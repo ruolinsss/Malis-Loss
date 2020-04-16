@@ -33,8 +33,8 @@ e = nhood.shape[0]
 aff_gt = seg_to_affgraph(seg_gt, nhood)   #The seg_gt needs to be reshaped as (z,y,x) and the output aff_gt has shape of (edge,z,y,x) 
 
 # adding dimensions to have 5d input data (batch,channel,x,y,z)
-data_ch = np.expand_dims(np.expand_dims(data,axis=0),axis=1)   #(batch,channel=1,z,y,x)
-aff_gt_label = np.expand_dims(aff_gt_label,axis=0)             #(batch,channel=edge,z,y,x)
+data_ch = np.expand_dims(np.expand_dims(raw_data,axis=0),axis=1)   #(batch,channel=1,z,y,x)
+aff_gt_label = np.expand_dims(aff_gt,axis=0)             #(batch,channel=edge,z,y,x)
 seg_gt = np.expand_dims(np.expand_dims(seg_gt,axis=0),axis=1)  #(batch,channel=1, z,y,x)
 
 
