@@ -8,7 +8,6 @@ import numpy as np
 import scipy.sparse
 import sys
 import os
-print(os.path.dirname(__file__))
 sys.path.insert(0,os.path.dirname(__file__))
 from _malis import malis_loss_weights, connected_components, marker_watershed
 
@@ -19,7 +18,9 @@ __all__ = ['compute_V_rand_N2',
            'bmap_to_affgraph',
            'seg_to_affgraph',
            'affgraph_to_seg',
-           'malis_weights',
+           'malis_pass',
+           'malis_weights_op',
+           #'malis_weights',
            'watershed_from_affgraph']
 
 def compute_V_rand_N2(seg_true, seg_pred):
@@ -321,92 +322,190 @@ class AffgraphToSeg(object):
 affgraph_to_seg = AffgraphToSeg()
 
 
+def malis_pass(affs, gt_affs, gt_seg,nhood,node1,node2,gt_aff_mask,gt_seg_unlabelled, pos):
 
+    # create a copy of the affinities and change them, such that in the
+    #   positive pass (pos == 1): affs[gt_affs == 0] = 0
+    #   negative pass (pos == 0): affs[gt_affs == 1] = 1
+          
+    pass_affs = np.copy(affs)
+    if gt_aff_mask.size == 0:
+            constraint_edges = np.array(gt_affs == (1 - pos))
+    else:
+        constraint_edges = np.logical_and(
+            gt_affs == (1 - pos),
+            gt_aff_mask == 1)
+    pass_affs[constraint_edges] = (1 - pos)    
+    pass_affs = np.ascontiguousarray(pass_affs, dtype=np.float32).ravel()
 
-def malis_weights(affinity_pred, affinity_gt, seg_gt, nhood,
-                 unrestrict_neg=False):  
+    weights = malis_loss_weights(
+        gt_seg,
+        node1,
+        node2,
+        pass_affs,
+        pos)
+
+    weights = weights.reshape(affs.shape)
+
+    # '1-pos' samples don't contribute in the 'pos' pass
+    weights[gt_affs == (1 - pos)] = 0
     
-    """
-    Computes MALIS loss weights
-    
-    Roughly speaking the malis weights quantify the impact of an edge in
-    the predicted affinity graph on the resulting segmentation.
+     # masked-out samples don't contribute
+    if gt_aff_mask.size > 0:
+        weights[gt_aff_mask == 0] = 0
 
-    Parameters
-    ----------
-    affinity_pred: 4d np.ndarray float32
-        Affinity graph of shape (#edges, x, y, z)
-        1: connected, 0: disconnected        
-    affinity_gt: 4d np.ndarray int16
-        Affinity graph of shape (#edges, x, y, z)
-        1: connected, 0: disconnected 
-    seg_gt: 3d np.ndarray, int (any precision)
-        Volume of segmentation IDs        
-    nhood: 2d np.ndarray, int
-        Neighbourhood pattern specifying the edges in the affinity graph
-        Shape: (#edges, ndim)
-        nhood[i] contains the displacement coordinates of edge i
-        The number and order of edges is arbitrary
-    unrestrict_neg: Bool
-        Use this to relax the restriction on neg_counts. The restriction
-        modifies the edge weights for before calculating the negative counts
-        as: ``edge_weights_neg = np.maximum(affinity_pred, affinity_gt)``
-        If unrestricted the predictions are used directly.
+#     # normalize
+#     weights = weights.astype(np.float32)
+#     num_pairs = np.sum(weights)
+#     if num_pairs > 0:
+#         weights = weights/num_pairs
+
+    return weights
+
+def malis_weights_op(
+        affs,
+        gt_affs,
+        gt_seg,
+        nhood,
+        gt_aff_mask,
+        gt_seg_unlabelled):
+    
+    '''Returns a tensorflow op to compute just the weights of the MALIS loss.
+    This is to be multiplied with an edge-wise base loss and summed up to create
+    the final loss. For the Euclidean loss, use ``malis_loss_op``.
+    Args:
+        affs (Tensor): The predicted affinities.
+        gt_affs (Tensor): The ground-truth affinities.
+        gt_seg (Tensor): The corresponding segmentation to the ground-truth
+            affinities. Label 0 denotes background.
+        neighborhood (Tensor): A list of spatial offsets, defining the
+            neighborhood for each voxel.
+        gt_aff_mask (Tensor): A binary mask indicating where ground-truth
+            affinities are known (known = 1, unknown = 0). This is to be used
+            for sparsely labelled ground-truth. Edges with unknown affinities
+            will not be constrained in the two malis passes, and will not
+            contribute to the loss.
+        gt_seg_unlabelled (Tensor): A binary mask indicating where the
+            ground-truth contains unlabelled objects (labelled = 1, unlabelled
+            = 0). This is to be used for ground-truth where only some objects
+            have been labelled. Note that this mask is a complement to
+            ``gt_aff_mask``: It is assumed that no objects cross from labelled
+            to unlabelled, i.e., the boundary is a real object boundary.
+            Ground-truth affinities within the unlabelled areas should be
+            masked out in ``gt_aff_mask``. Ground-truth affinities between
+            labelled and unlabelled areas should be zero in ``gt_affs``.
+        name (string, optional): A name to use for the operators created.
+    Returns:
+        Two tensors with the shape of ``affs``, with MALIS weights stored for each
+        edge.
+    '''
+    
+    gt_seg = np.ascontiguousarray(gt_seg, dtype=np.int32).ravel()
+    gt_affs = np.ascontiguousarray(gt_affs, dtype=np.float32)
+    
+    sh = affs.shape
+    vol_sh = sh[1:]        
+    node1, node2 = nodelist_from_shape(vol_sh, nhood)
+    node1, node2 = node1.ravel(), node2.ravel()
+            
+    # replace the unlabelled-object area with a new unique ID
+    gt_aff_mask = np.ascontiguousarray(gt_aff_mask)
+    gt_seg_unlabelled = np.ascontiguousarray(gt_seg_unlabelled)
+    if gt_seg_unlabelled.size > 0:
+        gt_seg[gt_seg_unlabelled == 0] = gt_seg.max() + 1
+
+    assert affs.shape[0] == len(nhood)
+    
+    weights_neg = malis_pass(affs, gt_affs, gt_seg,nhood, node1,node2, gt_aff_mask,gt_seg_unlabelled, 0)
+    weights_pos = malis_pass(affs, gt_affs, gt_seg,nhood, node1,node2, gt_aff_mask,gt_seg_unlabelled, 1)
+
+    return weights_neg, weights_pos
+
+
+
+# def malis_weights(affinity_pred, affinity_gt, seg_gt, nhood,
+#                  unrestrict_neg=False):  
+    
+#     """
+#     Computes MALIS loss weights
+    
+#     Roughly speaking the malis weights quantify the impact of an edge in
+#     the predicted affinity graph on the resulting segmentation.
+
+#     Parameters
+#     ----------
+#     affinity_pred: 4d np.ndarray float32
+#         Affinity graph of shape (#edges, x, y, z)
+#         1: connected, 0: disconnected        
+#     affinity_gt: 4d np.ndarray int16
+#         Affinity graph of shape (#edges, x, y, z)
+#         1: connected, 0: disconnected 
+#     seg_gt: 3d np.ndarray, int (any precision)
+#         Volume of segmentation IDs        
+#     nhood: 2d np.ndarray, int
+#         Neighbourhood pattern specifying the edges in the affinity graph
+#         Shape: (#edges, ndim)
+#         nhood[i] contains the displacement coordinates of edge i
+#         The number and order of edges is arbitrary
+#     unrestrict_neg: Bool
+#         Use this to relax the restriction on neg_counts. The restriction
+#         modifies the edge weights for before calculating the negative counts
+#         as: ``edge_weights_neg = np.maximum(affinity_pred, affinity_gt)``
+#         If unrestricted the predictions are used directly.
 
         
-    Returns
-    -------
+#     Returns
+#     -------
     
-    pos_counts: 4d np.ndarray int32
-      Impact counts for edges that should be 1 (connect)      
-    neg_counts: 4d np.ndarray int32
-      Impact counts for edges that should be 0 (disconnect)           
-    """
-    nhood = np.array(nhood)
+#     pos_counts: 4d np.ndarray int32
+#       Impact counts for edges that should be 1 (connect)      
+#     neg_counts: 4d np.ndarray int32
+#       Impact counts for edges that should be 0 (disconnect)           
+#     """
+#     nhood = np.array(nhood)
     
-    edgelist_cache = dict()
+#     edgelist_cache = dict()
 
-    sh = affinity_pred.shape
-    vol_sh = sh[1:]
+#     sh = affinity_pred.shape
+#     vol_sh = sh[1:]
     
-    key = (tuple(vol_sh), nhood.tobytes())
+#     key = (tuple(vol_sh), nhood.tobytes())
     
-    if key in edgelist_cache:
-        node1, node2 = edgelist_cache[key]
-    else:
-        node1, node2 = nodelist_from_shape(vol_sh, nhood)
-        node1, node2 = node1.ravel(), node2.ravel()
-        edgelist_cache[key] = (node1, node2)
+#     if key in edgelist_cache:
+#         node1, node2 = edgelist_cache[key]
+#     else:
+#         node1, node2 = nodelist_from_shape(vol_sh, nhood)
+#         node1, node2 = node1.ravel(), node2.ravel()
+#         edgelist_cache[key] = (node1, node2)
 
 
-    affinity_gt   = np.ascontiguousarray(affinity_gt,dtype=np.float32).ravel()
-    affinity_pred = np.ascontiguousarray(affinity_pred, dtype=np.float32).ravel()
-    seg_gt        = np.ascontiguousarray(seg_gt, dtype=np.int32).ravel()
+#     affinity_gt   = np.ascontiguousarray(affinity_gt,dtype=np.float32).ravel()
+#     affinity_pred = np.ascontiguousarray(affinity_pred, dtype=np.float32).ravel()
+#     seg_gt        = np.ascontiguousarray(seg_gt, dtype=np.int32).ravel()
 
-    # MALIS
-    edge_weights_pos = np.minimum(affinity_pred, affinity_gt)
-    pos_counts = malis_loss_weights(seg_gt,
-                                    node1,
-                                    node2,
-                                    edge_weights_pos,
-                                    1)
-    if unrestrict_neg:
-        edge_weights_neg = affinity_pred
-    else:
-        edge_weights_neg = np.maximum(affinity_pred, affinity_gt)
+#     # MALIS
+#     edge_weights_pos = np.minimum(affinity_pred, affinity_gt)
+#     pos_counts = malis_loss_weights(seg_gt,
+#                                     node1,
+#                                     node2,
+#                                     edge_weights_pos,
+#                                     1)
+#     if unrestrict_neg:
+#         edge_weights_neg = affinity_pred
+#     else:
+#         edge_weights_neg = np.maximum(affinity_pred, affinity_gt)
 
 
-    neg_counts = malis_loss_weights(seg_gt,
-                                    node1,
-                                    node2,
-                                    edge_weights_neg,
-                                    0)
+#     neg_counts = malis_loss_weights(seg_gt,
+#                                     node1,
+#                                     node2,
+#                                     edge_weights_neg,
+#                                     0)
 
-    pos_counts = pos_counts.reshape(sh)
-    neg_counts = neg_counts.reshape(sh)
-    
+#     pos_counts = pos_counts.reshape(sh)
+#     neg_counts = neg_counts.reshape(sh)
 
-    return pos_counts, neg_counts
+#     return neg_counts,pos_counts
 
 
 
