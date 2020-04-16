@@ -37,12 +37,12 @@ Usage:
 An example of using this package is shown in example.ipynb in test folder.
 
 Detailly:
-from malis.malis_utils import mknhood3d,seg_to_affgraph,malis_weights,affgraph_to_seg  ## most important 4 functions
+from malis.malis_utils import mknhood3d,seg_to_affgraph,affgraph_to_seg  ## most important 3 functions
+from malis.malis_tf import malis_loss
 
 mknhood3d(): Makes neighbourhood structures
 seg_to_affgraph(seg_gt,nhood): Construct an affinity graph from a segmentation
 affgraph_to_seg(affinity,nhood,size_thresh): Obtain a segentation graph from an affinity graph
-pos_t, neg_t = malis_weights(affinity_pred, affinity_gt, seg_gt, nhood): 
-                                        Computes MALIS loss weights (malisloss = sum(pos_t * affinity_pred))
+loss = malis_loss(aff_pred,aff_gt,seg_gt,nhood): Obtain malis loss
 
 
