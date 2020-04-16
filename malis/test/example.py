@@ -15,7 +15,8 @@ from keras.callbacks import CSVLogger
 import tensorflow as tf
 import numpy as np
 import h5py
-from malis.malis_utils import mknhood3d,seg_to_affgraph,malis_weights,affgraph_to_seg
+from malis.malis_utils import mknhood3d,seg_to_affgraph,affgraph_to_seg
+from malis.malis_tf import malis_loss
 
 
 # In[2]:
@@ -53,14 +54,7 @@ def MALIS_loss(seg_gt):
         new_y_pred = K.reshape(y_pred,(e,-1,y,x))
         new_seg = K.reshape(seg_gt,(-1,y,x))
         
-        pos_t, neg_t = tf.py_function(
-            malis_weights,
-            [new_y_pred, new_y_true, new_seg, nhood],
-            [tf.int32,tf.int32])
-        pos_t = tf.cast(pos_t,tf.float32)
-        neg_t = tf.cast(neg_t,tf.float32)
-        
-        loss = tf.reduce_sum(pos_t * new_y_pred)
+        loss = malis_loss(new_y_pred, new_y_true, new_seg, nhood)
         
         return loss
     return loss
